@@ -145,6 +145,18 @@ def main(args):
 
     if args.output_dir:
         utils.mkdir(args.output_dir)
+    if args.ipex:
+        import intel_pytorch_extension as ipex
+        args.device = ipex.DEVICE
+        if args.dnnl:
+            ipex.core.enable_auto_dnnl()
+        else:
+            ipex.core.disable_auto_dnnl()
+        if args.mix_precision:
+            ipex.enable_auto_mixed_precision(mixed_dtype=torch.bfloat16, train=True)
+        # jit path only enabled for inference
+        if args.jit and args.evaluate:
+            ipex.core.enable_jit_opt()
 
     utils.init_distributed_mode(args)
     print(args)
@@ -168,7 +180,8 @@ def main(args):
     print("Creating model")
     model = torchvision.models.__dict__[args.model](pretrained=args.pretrained)
     model.to(device)
-    if args.distributed and args.sync_bn:
+    is_cuda = all([p.device.type == 'cuda' for p in model.parameters()])
+    if args.distributed and args.sync_bn and is_cuda:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
     criterion = nn.CrossEntropyLoss()
@@ -185,7 +198,10 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        if args.dist_backend == "ccl":
+            model = torch.nn.parallel.DistributedDataParallel(model)
+        elif args.dist_backend == "nccl":
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
     if args.resume:
@@ -289,7 +305,16 @@ def parse_args():
     parser.add_argument('--world-size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist-url', default='env://', help='url used to set up distributed training')
-
+    parser.add_argument('--dist-backend', default=None, help='backend set up distributed training')
+    parser.add_argument('--mpi-launcher', action='store_true', default=False,  help='use mpi to launch  distributed training')
+    parser.add_argument('--ipex', action='store_true', default=False,
+                        help='enable Intel_PyTorch_Extension')
+    parser.add_argument('--dnnl', action='store_true', default=False,
+                        help='enable Intel_PyTorch_Extension auto dnnl path')
+    parser.add_argument('--mix-precision', action='store_true', default=False,
+                        help='enable ipex mix precision')
+    parser.add_argument('--jit', action='store_true', default=False,
+                        help='enable Intel_PyTorch_Extension JIT path')
     args = parser.parse_args()
 
     return args
